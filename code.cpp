@@ -10,7 +10,7 @@
 using namespace std;
 
 const int NUM_BUCKETS = 19;
-const int MAX_CACHE_SIZE = 3;
+const int MAX_CACHE_SIZE = 4;
 const string BUCKET_PREFIX = "bucket_";
 
 struct CachedBucket {
@@ -52,6 +52,10 @@ void load_bucket(int bucket, CachedBucket &cb) {
     fseek(f, 0, SEEK_END);
     cb.file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
+
+    // Estimate number of entries and reserve
+    size_t estimated_entries = static_cast<size_t>(cb.file_size / (1 + sizeof(size_t) + 8 + sizeof(int)));
+    cb.entries.reserve(estimated_entries);
 
     while (true) {
         uint8_t deleted;
