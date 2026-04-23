@@ -21,128 +21,142 @@ uint64_t hash_string(const string &s) {
     return hash;
 }
 
-struct Entry {
-    bool deleted;
-    string index;
-    int value;
-};
-
 int get_bucket(const string &index) {
     uint64_t h = hash_string(index);
     return static_cast<int>(h % NUM_BUCKETS);
 }
 
-vector<Entry> load_bucket(int bucket) {
-    vector<Entry> entries;
-    string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
+vector<int> find_entries(const string &index) {
+    int b = get_bucket(index);
+    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
     FILE *f = fopen(filename.c_str(), "rb");
+    vector<int> result;
+
     if (!f) {
-        return entries;
+        return result;
     }
 
     while (true) {
-        uint8_t deleted_byte;
-        if (fread(&deleted_byte, 1, 1, f) != 1) {
+        long entry_offset = ftell(f);
+        uint8_t deleted;
+        if (fread(&deleted, 1, 1, f) != 1) {
             break;
         }
         size_t index_len;
         if (fread(&index_len, sizeof(index_len), 1, f) != 1) {
             break;
         }
-        string index;
-        index.resize(index_len);
-        if (fread(&index[0], 1, index_len, f) != index_len) {
+        string idx;
+        idx.resize(index_len);
+        if (fread(&idx[0], 1, index_len, f) != index_len) {
             break;
         }
         int value;
         if (fread(&value, sizeof(value), 1, f) != 1) {
             break;
         }
-        entries.push_back({static_cast<bool>(deleted_byte), index, value});
+
+        if (!deleted && idx == index) {
+            result.push_back(value);
+        }
     }
 
     fclose(f);
-    return entries;
-}
-
-void append_entry(int bucket, const Entry &entry) {
-    string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
-    FILE *f = fopen(filename.c_str(), "ab");
-    if (!f) {
-        return;
-    }
-    uint8_t deleted_byte = static_cast<uint8_t>(entry.deleted);
-    fwrite(&deleted_byte, 1, 1, f);
-    size_t index_len = entry.index.size();
-    fwrite(&index_len, sizeof(index_len), 1, f);
-    fwrite(entry.index.data(), 1, index_len, f);
-    fwrite(&entry.value, sizeof(entry.value), 1, f);
-    fclose(f);
-}
-
-void rewrite_bucket(int bucket, const vector<Entry> &entries) {
-    string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
-    FILE *f = fopen(filename.c_str(), "wb");
-    if (!f) {
-        return;
-    }
-    for (const auto &entry : entries) {
-        uint8_t deleted_byte = static_cast<uint8_t>(entry.deleted);
-        fwrite(&deleted_byte, 1, 1, f);
-        size_t index_len = entry.index.size();
-        fwrite(&index_len, sizeof(index_len), 1, f);
-        fwrite(entry.index.data(), 1, index_len, f);
-        fwrite(&entry.value, sizeof(entry.value), 1, f);
-    }
-    fclose(f);
+    sort(result.begin(), result.end());
+    return result;
 }
 
 void insert_entry(const string &index, int value) {
     int b = get_bucket(index);
-    vector<Entry> entries = load_bucket(b);
+    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
 
-    // Check if already exists
-    for (const auto &e : entries) {
-        if (!e.deleted && e.index == index && e.value == value) {
+    // Check for duplicate - need to scan entire file
+    FILE *check = fopen(filename.c_str(), "rb");
+    if (check) {
+        bool exists = false;
+        while (true) {
+            uint8_t deleted;
+            if (fread(&deleted, 1, 1, check) != 1) {
+                break;
+            }
+            size_t index_len;
+            if (fread(&index_len, sizeof(index_len), 1, check) != 1) {
+                break;
+            }
+            string idx;
+            idx.resize(index_len);
+            if (fread(&idx[0], 1, index_len, check) != index_len) {
+                break;
+            }
+            int val;
+            if (fread(&val, sizeof(val), 1, check) != 1) {
+                break;
+            }
+            if (!deleted && idx == index && val == value) {
+                exists = true;
+                break;
+            }
+        }
+        fclose(check);
+        if (exists) {
             return;
         }
     }
 
-    // Append new entry - O(1) write
-    append_entry(b, {false, index, value});
+    // Append new entry
+    FILE *f = fopen(filename.c_str(), "ab");
+    if (!f) {
+        return;
+    }
+    uint8_t deleted = 0;
+    fwrite(&deleted, 1, 1, f);
+    size_t index_len = index.size();
+    fwrite(&index_len, sizeof(index_len), 1, f);
+    fwrite(index.data(), 1, index_len, f);
+    fwrite(&value, sizeof(value), 1, f);
+    fclose(f);
 }
 
 void delete_entry(const string &index, int value) {
     int b = get_bucket(index);
-    vector<Entry> entries = load_bucket(b);
+    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
 
-    bool found = false;
-    for (auto &e : entries) {
-        if (!e.deleted && e.index == index && e.value == value) {
-            e.deleted = true;
-            found = true;
+    FILE *f = fopen(filename.c_str(), "r+b");
+    if (!f) {
+        return;
+    }
+
+    while (true) {
+        long entry_offset = ftell(f);
+        uint8_t deleted;
+        if (fread(&deleted, 1, 1, f) != 1) {
+            break;
+        }
+        size_t index_len;
+        if (fread(&index_len, sizeof(index_len), 1, f) != 1) {
+            break;
+        }
+        string idx;
+        idx.resize(index_len);
+        if (fread(&idx[0], 1, index_len, f) != index_len) {
+            break;
+        }
+        int val;
+        if (fread(&val, sizeof(val), 1, f) != 1) {
+            break;
+        }
+
+        if (!deleted && idx == index && val == value) {
+            // Seek back to the deleted flag byte and set it to 1
+            fseek(f, entry_offset, SEEK_SET);
+            uint8_t new_deleted = 1;
+            fwrite(&new_deleted, 1, 1, f);
+            fflush(f);
             break;
         }
     }
 
-    if (found) {
-        rewrite_bucket(b, entries);
-    }
-}
-
-vector<int> find_entries(const string &index) {
-    int b = get_bucket(index);
-    vector<Entry> entries = load_bucket(b);
-    vector<int> result;
-
-    for (const auto &e : entries) {
-        if (!e.deleted && e.index == index) {
-            result.push_back(e.value);
-        }
-    }
-
-    sort(result.begin(), result.end());
-    return result;
+    fclose(f);
 }
 
 int main() {
