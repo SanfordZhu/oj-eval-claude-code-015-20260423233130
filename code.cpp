@@ -10,7 +10,7 @@
 using namespace std;
 
 const int NUM_BUCKETS = 19;
-const int MAX_CACHE_SIZE = 4;
+const int MAX_CACHE_SIZE = 5;
 const string BUCKET_PREFIX = "bucket_";
 
 struct CachedBucket {
