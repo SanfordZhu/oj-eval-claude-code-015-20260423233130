@@ -22,6 +22,7 @@ uint64_t hash_string(const string &s) {
 }
 
 struct Entry {
+    bool deleted;
     string index;
     int value;
 };
@@ -40,6 +41,10 @@ vector<Entry> load_bucket(int bucket) {
     }
 
     while (true) {
+        uint8_t deleted_byte;
+        if (fread(&deleted_byte, 1, 1, f) != 1) {
+            break;
+        }
         size_t index_len;
         if (fread(&index_len, sizeof(index_len), 1, f) != 1) {
             break;
@@ -53,27 +58,42 @@ vector<Entry> load_bucket(int bucket) {
         if (fread(&value, sizeof(value), 1, f) != 1) {
             break;
         }
-        entries.push_back({index, value});
+        entries.push_back({static_cast<bool>(deleted_byte), index, value});
     }
 
     fclose(f);
     return entries;
 }
 
-void save_bucket(int bucket, const vector<Entry> &entries) {
+void append_entry(int bucket, const Entry &entry) {
+    string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
+    FILE *f = fopen(filename.c_str(), "ab");
+    if (!f) {
+        return;
+    }
+    uint8_t deleted_byte = static_cast<uint8_t>(entry.deleted);
+    fwrite(&deleted_byte, 1, 1, f);
+    size_t index_len = entry.index.size();
+    fwrite(&index_len, sizeof(index_len), 1, f);
+    fwrite(entry.index.data(), 1, index_len, f);
+    fwrite(&entry.value, sizeof(entry.value), 1, f);
+    fclose(f);
+}
+
+void rewrite_bucket(int bucket, const vector<Entry> &entries) {
     string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
     FILE *f = fopen(filename.c_str(), "wb");
     if (!f) {
         return;
     }
-
     for (const auto &entry : entries) {
+        uint8_t deleted_byte = static_cast<uint8_t>(entry.deleted);
+        fwrite(&deleted_byte, 1, 1, f);
         size_t index_len = entry.index.size();
         fwrite(&index_len, sizeof(index_len), 1, f);
         fwrite(entry.index.data(), 1, index_len, f);
         fwrite(&entry.value, sizeof(entry.value), 1, f);
     }
-
     fclose(f);
 }
 
@@ -81,37 +101,32 @@ void insert_entry(const string &index, int value) {
     int b = get_bucket(index);
     vector<Entry> entries = load_bucket(b);
 
-    auto it = lower_bound(entries.begin(), entries.end(), Entry{index, value},
-        [](const Entry &a, const Entry &b) {
-            if (a.index != b.index) {
-                return a.index < b.index;
-            }
-            return a.value < b.value;
-        });
-
-    if (it != entries.end() && it->index == index && it->value == value) {
-        return;
+    // Check if already exists
+    for (const auto &e : entries) {
+        if (!e.deleted && e.index == index && e.value == value) {
+            return;
+        }
     }
 
-    entries.insert(it, Entry{index, value});
-    save_bucket(b, entries);
+    // Append new entry - O(1) write
+    append_entry(b, {false, index, value});
 }
 
 void delete_entry(const string &index, int value) {
     int b = get_bucket(index);
     vector<Entry> entries = load_bucket(b);
 
-    auto it = lower_bound(entries.begin(), entries.end(), Entry{index, value},
-        [](const Entry &a, const Entry &b) {
-            if (a.index != b.index) {
-                return a.index < b.index;
-            }
-            return a.value < b.value;
-        });
+    bool found = false;
+    for (auto &e : entries) {
+        if (!e.deleted && e.index == index && e.value == value) {
+            e.deleted = true;
+            found = true;
+            break;
+        }
+    }
 
-    if (it != entries.end() && it->index == index && it->value == value) {
-        entries.erase(it);
-        save_bucket(b, entries);
+    if (found) {
+        rewrite_bucket(b, entries);
     }
 }
 
@@ -120,17 +135,13 @@ vector<int> find_entries(const string &index) {
     vector<Entry> entries = load_bucket(b);
     vector<int> result;
 
-    auto comp = [](const Entry &entry, const string &idx) {
-        return entry.index < idx;
-    };
-
-    auto it = lower_bound(entries.begin(), entries.end(), index, comp);
-
-    while (it != entries.end() && it->index == index) {
-        result.push_back(it->value);
-        ++it;
+    for (const auto &e : entries) {
+        if (!e.deleted && e.index == index) {
+            result.push_back(e.value);
+        }
     }
 
+    sort(result.begin(), result.end());
     return result;
 }
 
