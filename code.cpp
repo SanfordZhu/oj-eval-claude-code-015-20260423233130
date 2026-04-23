@@ -156,13 +156,15 @@ void delete_entry(const string &index, int value) {
                 size_t index_len;
                 if (fread(&index_len, sizeof(index_len), 1, f) != 1) break;
                 offset += sizeof(index_len);
-                if (fseek(f, index_len, SEEK_CUR) != 0) break;
+                string idx;
+                idx.resize(index_len);
+                if (fread(&idx[0], 1, index_len, f) != index_len) break;
                 offset += index_len;
                 int val;
                 if (fread(&val, sizeof(val), 1, f) != 1) break;
                 offset += sizeof(val);
 
-                if (!deleted && entry.first == index && val == value) {
+                if (!deleted && idx == index && val == value) {
                     fseek(f, entry_offset, SEEK_SET);
                     uint8_t new_deleted = 1;
                     fwrite(&new_deleted, 1, 1, f);
