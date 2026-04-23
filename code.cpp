@@ -4,11 +4,21 @@
 #include <string>
 #include <algorithm>
 #include <cstdint>
+#include <unordered_map>
 
 using namespace std;
 
 const int NUM_BUCKETS = 19;
 const string BUCKET_PREFIX = "bucket_";
+
+struct CachedEntry {
+    bool loaded = false;
+    vector<pair<string, pair<bool, int>>> entries;  // (index, (deleted, value))
+    long file_size = 0;
+};
+
+CachedEntry cache;
+int cached_bucket = -1;
 
 uint64_t hash_string(const string &s) {
     const uint64_t FNV_OFFSET = 14695981039346313805ULL;
@@ -26,18 +36,22 @@ int get_bucket(const string &index) {
     return static_cast<int>(h % NUM_BUCKETS);
 }
 
-vector<int> find_entries(const string &index) {
-    int b = get_bucket(index);
-    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
+void load_bucket(int bucket, CachedEntry &cached) {
+    cached.loaded = false;
+    cached.entries.clear();
+    string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
     FILE *f = fopen(filename.c_str(), "rb");
-    vector<int> result;
-
     if (!f) {
-        return result;
+        cached.loaded = true;
+        cached.file_size = 0;
+        return;
     }
 
+    fseek(f, 0, SEEK_END);
+    cached.file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
     while (true) {
-        long entry_offset = ftell(f);
         uint8_t deleted;
         if (fread(&deleted, 1, 1, f) != 1) {
             break;
@@ -55,59 +69,50 @@ vector<int> find_entries(const string &index) {
         if (fread(&value, sizeof(value), 1, f) != 1) {
             break;
         }
-
-        if (!deleted && idx == index) {
-            result.push_back(value);
-        }
+        cached.entries.push_back({idx, {static_cast<bool>(deleted), value}});
     }
 
     fclose(f);
+    cached.loaded = true;
+}
+
+vector<int> find_entries(const string &index) {
+    int b = get_bucket(index);
+    vector<int> result;
+
+    if (cached_bucket != b) {
+        load_bucket(b, cache);
+        cached_bucket = b;
+    }
+
+    for (const auto &entry : cache.entries) {
+        if (!entry.second.first && entry.first == index) {
+            result.push_back(entry.second.second);
+        }
+    }
+
     sort(result.begin(), result.end());
     return result;
 }
 
 void insert_entry(const string &index, int value) {
     int b = get_bucket(index);
-    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
 
-    // Check for duplicate - need to scan entire file
-    FILE *check = fopen(filename.c_str(), "rb");
-    if (check) {
-        bool exists = false;
-        while (true) {
-            uint8_t deleted;
-            if (fread(&deleted, 1, 1, check) != 1) {
-                break;
-            }
-            size_t index_len;
-            if (fread(&index_len, sizeof(index_len), 1, check) != 1) {
-                break;
-            }
-            string idx;
-            idx.resize(index_len);
-            if (fread(&idx[0], 1, index_len, check) != index_len) {
-                break;
-            }
-            int val;
-            if (fread(&val, sizeof(val), 1, check) != 1) {
-                break;
-            }
-            if (!deleted && idx == index && val == value) {
-                exists = true;
-                break;
-            }
-        }
-        fclose(check);
-        if (exists) {
+    if (cached_bucket != b) {
+        load_bucket(b, cache);
+        cached_bucket = b;
+    }
+
+    // Check for duplicate
+    for (const auto &entry : cache.entries) {
+        if (!entry.second.first && entry.first == index && entry.second.second == value) {
             return;
         }
     }
 
-    // Append new entry
+    // Append to file
+    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
     FILE *f = fopen(filename.c_str(), "ab");
-    if (!f) {
-        return;
-    }
     uint8_t deleted = 0;
     fwrite(&deleted, 1, 1, f);
     size_t index_len = index.size();
@@ -115,48 +120,60 @@ void insert_entry(const string &index, int value) {
     fwrite(index.data(), 1, index_len, f);
     fwrite(&value, sizeof(value), 1, f);
     fclose(f);
+
+    // Add to cache
+    cache.entries.push_back({index, {false, value}});
+    cache.file_size += (1 + sizeof(size_t) + index.size() + sizeof(int));
 }
 
 void delete_entry(const string &index, int value) {
     int b = get_bucket(index);
-    string filename = BUCKET_PREFIX + to_string(b) + ".dat";
 
-    FILE *f = fopen(filename.c_str(), "r+b");
-    if (!f) {
-        return;
+    if (cached_bucket != b) {
+        load_bucket(b, cache);
+        cached_bucket = b;
     }
 
-    while (true) {
-        long entry_offset = ftell(f);
-        uint8_t deleted;
-        if (fread(&deleted, 1, 1, f) != 1) {
-            break;
-        }
-        size_t index_len;
-        if (fread(&index_len, sizeof(index_len), 1, f) != 1) {
-            break;
-        }
-        string idx;
-        idx.resize(index_len);
-        if (fread(&idx[0], 1, index_len, f) != index_len) {
-            break;
-        }
-        int val;
-        if (fread(&val, sizeof(val), 1, f) != 1) {
-            break;
-        }
+    // Find in cache and mark as deleted
+    for (auto &entry : cache.entries) {
+        if (!entry.second.first && entry.first == index && entry.second.second == value) {
+            entry.second.first = true;
+            // Update file: find the entry position and mark deleted
+            string filename = BUCKET_PREFIX + to_string(b) + ".dat";
+            FILE *f = fopen(filename.c_str(), "r+b");
+            if (!f) {
+                fclose(f);
+                return;
+            }
+            // We need to scan to find the entry again to get its offset
+            // Alternatively we could store offsets in cache, but that uses a bit more memory
+            long offset = 0;
+            while (true) {
+                long entry_offset = offset;
+                uint8_t deleted;
+                if (fread(&deleted, 1, 1, f) != 1) break;
+                offset += 1;
+                size_t index_len;
+                if (fread(&index_len, sizeof(index_len), 1, f) != 1) break;
+                offset += sizeof(index_len);
+                if (fseek(f, index_len, SEEK_CUR) != 0) break;
+                offset += index_len;
+                int val;
+                if (fread(&val, sizeof(val), 1, f) != 1) break;
+                offset += sizeof(val);
 
-        if (!deleted && idx == index && val == value) {
-            // Seek back to the deleted flag byte and set it to 1
-            fseek(f, entry_offset, SEEK_SET);
-            uint8_t new_deleted = 1;
-            fwrite(&new_deleted, 1, 1, f);
-            fflush(f);
+                if (!deleted && entry.first == index && val == value) {
+                    fseek(f, entry_offset, SEEK_SET);
+                    uint8_t new_deleted = 1;
+                    fwrite(&new_deleted, 1, 1, f);
+                    fflush(f);
+                    break;
+                }
+            }
+            fclose(f);
             break;
         }
     }
-
-    fclose(f);
 }
 
 int main() {
