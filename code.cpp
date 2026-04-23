@@ -1,20 +1,22 @@
 #include <iostream>
-#include <fstream>
+#include <cstdio>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <cstdint>
-#include <iomanip>
 
 using namespace std;
 
-const int NUM_BUCKETS = 16;
+const int NUM_BUCKETS = 19;
 const string BUCKET_PREFIX = "bucket_";
 
 uint64_t hash_string(const string &s) {
-    uint64_t hash = 0;
+    const uint64_t FNV_OFFSET = 14695981039346313805ULL;
+    const uint64_t FNV_PRIME = 1099511628211ULL;
+    uint64_t hash = FNV_OFFSET;
     for (char c : s) {
-        hash = hash * 31 + static_cast<unsigned char>(c);
+        hash ^= static_cast<unsigned char>(c);
+        hash *= FNV_PRIME;
     }
     return hash;
 }
@@ -32,48 +34,47 @@ int get_bucket(const string &index) {
 vector<Entry> load_bucket(int bucket) {
     vector<Entry> entries;
     string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
-    ifstream in(filename, ios::binary);
-    if (!in) {
+    FILE *f = fopen(filename.c_str(), "rb");
+    if (!f) {
         return entries;
     }
 
-    while (in.peek() != EOF) {
+    while (true) {
         size_t index_len;
-        if (!in.read(reinterpret_cast<char*>(&index_len), sizeof(index_len))) {
+        if (fread(&index_len, sizeof(index_len), 1, f) != 1) {
             break;
         }
         string index;
         index.resize(index_len);
-        if (!in.read(&index[0], index_len)) {
+        if (fread(&index[0], 1, index_len, f) != index_len) {
             break;
         }
         int value;
-        if (!in.read(reinterpret_cast<char*>(&value), sizeof(value))) {
+        if (fread(&value, sizeof(value), 1, f) != 1) {
             break;
         }
         entries.push_back({index, value});
     }
 
-    in.close();
+    fclose(f);
     return entries;
 }
 
 void save_bucket(int bucket, const vector<Entry> &entries) {
     string filename = BUCKET_PREFIX + to_string(bucket) + ".dat";
-    ofstream out(filename, ios::binary | ios::trunc);
-    if (!out) {
-        cerr << "Failed to write bucket " << bucket << endl;
+    FILE *f = fopen(filename.c_str(), "wb");
+    if (!f) {
         return;
     }
 
     for (const auto &entry : entries) {
         size_t index_len = entry.index.size();
-        out.write(reinterpret_cast<const char*>(&index_len), sizeof(index_len));
-        out.write(entry.index.data(), entry.index.size());
-        out.write(reinterpret_cast<const char*>(&entry.value), sizeof(entry.value));
+        fwrite(&index_len, sizeof(index_len), 1, f);
+        fwrite(entry.index.data(), 1, index_len, f);
+        fwrite(&entry.value, sizeof(entry.value), 1, f);
     }
 
-    out.close();
+    fclose(f);
 }
 
 void insert_entry(const string &index, int value) {
